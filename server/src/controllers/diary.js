@@ -1,6 +1,6 @@
 import User from '../models/User.js';
 import DiaryEntry from '../models/DiaryEntry.js';
-import { generateDiaryEntry } from '../ai/gemini.js';
+import { generateDiaryEntry } from '../ai/grok.js';
 import { encrypt, encryptMessages } from '../utils/crypto.js';
 
 export const closeSession = async (user) => {
