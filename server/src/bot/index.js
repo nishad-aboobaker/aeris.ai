@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import { handleOnboarding } from './onboarding.js';
 import { chatWithAeris, generateContextualPrompt } from '../ai/grok.js';
 import { closeSession, getDiaryEntries } from '../controllers/diary.js';
+import { decrypt } from '../utils/crypto.js';
 
 const SESSION_TIMEOUT_MINUTES = 30;
 
@@ -24,11 +25,9 @@ export const initBot = () => {
         const parts = text.split(' ');
         const token = parts[1]?.trim().toUpperCase();
 
-        // Try to link with web account via token
         if (token) {
           const webUser = await User.findOne({ link_token: token });
           if (webUser && !webUser.telegram_linked) {
-            // Check for existing bot-only user and delete to prevent duplicate key error
             const existingBotUser = await User.findOne({ telegram_id: telegramId });
             if (existingBotUser && existingBotUser._id.toString() !== webUser._id.toString()) {
               await User.deleteOne({ _id: existingBotUser._id });
@@ -37,7 +36,7 @@ export const initBot = () => {
             webUser.telegram_id = telegramId;
             webUser.telegram_username = username;
             webUser.telegram_linked = true;
-            webUser.onboarding.completed = true; // web signup = onboarding done
+            webUser.onboarding.completed = true;
             await webUser.save();
             await bot.sendMessage(telegramId,
               `hey ${webUser.profile?.name || 'there'}! 🎉 you're all linked up!\n\ni'm Aeris — your personal diary bestie. i'll check in with you every evening 🌙\n\ncan't wait to hear about your days!`
@@ -54,12 +53,11 @@ export const initBot = () => {
           return;
         }
 
-        // Start onboarding for new user (direct bot users, no web signup)
         await handleOnboarding(bot, telegramId, username, '/start');
         return;
       }
 
-      // Handle /diary command - show recent entries
+      // Handle /diary command
       if (text === '/diary') {
         const entries = await getDiaryEntries(telegramId, 5);
         if (entries.length === 0) {
@@ -77,7 +75,7 @@ export const initBot = () => {
         return;
       }
 
-      // Handle /memory command - show what Aeris knows
+      // Handle /memory command
       if (text === '/memory') {
         const user = await User.findOne({ telegram_id: telegramId });
         if (!user) return;
@@ -102,16 +100,13 @@ export const initBot = () => {
           response += `\n*ongoing in your life:*\n`;
           user.ongoing_events
             .filter(e => e.status === 'active')
-            .forEach(e => {
-              response += `• ${e.title}\n`;
-            });
+            .forEach(e => { response += `• ${e.title}\n`; });
         }
 
         await bot.sendMessage(telegramId, response, { parse_mode: 'Markdown' });
         return;
       }
 
-      // Check if user exists and onboarding is complete
       const user = await User.findOne({ telegram_id: telegramId });
 
       if (!user || !user.onboarding?.completed) {
@@ -120,17 +115,19 @@ export const initBot = () => {
       }
 
       // Check for session end keywords
-      const endKeywords = ['bye', 'good night', 'goodnight', 'gn', 'that\'s it', "that's all", 'done', 'byee', 'ok bye'];
+      const endKeywords = ['bye', 'good night', 'goodnight', 'gn', "that's it", "that's all", 'done', 'byee', 'ok bye'];
       const isEnding = endKeywords.some(k => text.toLowerCase().includes(k));
 
       if (isEnding && user.session?.active) {
-        // Close session and save diary
         const entry = await closeSession(user);
 
         if (entry?.diary_entry) {
+          // Decrypt content before sending to user
+          const decryptedContent = decrypt(entry.diary_entry.content, entry.user);
+
           await bot.sendMessage(telegramId,
             `aww good night! 🌙✨\n\ni wrote today's diary for you:\n\n` +
-            `*${entry.diary_entry.title}*\n\n${entry.diary_entry.content}`,
+            `*${entry.diary_entry.title}*\n\n${decryptedContent}`,
             { parse_mode: 'Markdown' }
           );
         } else {
@@ -152,7 +149,6 @@ export const initBot = () => {
         const minutesElapsed = (Date.now() - new Date(user.session.started_at)) / 60000;
         if (minutesElapsed > SESSION_TIMEOUT_MINUTES) {
           await closeSession(user);
-          // Reload user after session close
           const refreshed = await User.findOne({ telegram_id: telegramId });
           refreshed.session.active = true;
           refreshed.session.started_at = new Date();
@@ -161,16 +157,12 @@ export const initBot = () => {
         }
       }
 
-      // Get fresh user state
       const freshUser = await User.findOne({ telegram_id: telegramId });
 
-      // Show typing indicator
       await bot.sendChatAction(telegramId, 'typing');
 
-      // Chat with Aeris
       const reply = await chatWithAeris(freshUser, freshUser.session.messages, text);
 
-      // Save messages to session
       freshUser.session.messages.push({ role: 'user', content: text, timestamp: new Date() });
       freshUser.session.messages.push({ role: 'aeris', content: reply, timestamp: new Date() });
       freshUser.last_active = new Date();
@@ -187,12 +179,10 @@ export const initBot = () => {
   return bot;
 };
 
-// Export for use in cron
 export const sendDailyPrompt = async (bot, telegramId, userName) => {
   let finalPrompt = null;
 
   try {
-    // Try to get yesterday's entry
     const entries = await getDiaryEntries(telegramId, 1);
     if (entries && entries.length > 0) {
       finalPrompt = await generateContextualPrompt({ profile: { name: userName } }, entries[0]);
@@ -202,7 +192,6 @@ export const sendDailyPrompt = async (bot, telegramId, userName) => {
   }
 
   if (!finalPrompt) {
-    // Fallback generic prompts
     const prompts = [
       `hey ${userName}! 🌙 so how was your day? tell me everything`,
       `${userName}! it's your time to spill ☕ what happened today?`,
