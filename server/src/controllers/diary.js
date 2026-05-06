@@ -12,10 +12,12 @@ export const closeSession = async (user) => {
     const today = new Date().toISOString().split('T')[0];
     const userId = user._id;
 
-    // Encrypt raw chat and diary content
+    // Encrypt raw chat
     const encryptedMessages = encryptMessages(session.messages, userId);
-    const encryptedContent = generated?.diary_entry?.content
-      ? encrypt(generated.diary_entry.content, userId)
+
+    // Encrypt diary content
+    const encryptedContent = generated?.content
+      ? encrypt(generated.content, userId)
       : null;
 
     const entry = await DiaryEntry.create({
